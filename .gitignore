@@ -1,0 +1,19 @@
+# Dados gerados — o conhecimento vive no repositório de conhecimento, não aqui
+data/
+knowledge/
+site/
+kb/
+
+# SQLite
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+dist/
