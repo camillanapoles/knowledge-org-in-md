@@ -1,0 +1,115 @@
+name: crawl
+
+# Pipeline serverless: roda no GitHub Actions, persiste o SQLite via cache,
+# retoma jobs pendentes de execuções anteriores e publica o conhecimento
+# no repositório de conhecimento (vars.KNOWLEDGE_REPO) — ver docs/adr/0001.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL raiz a raspar"
+        required: true
+        type: string
+      max_depth:
+        description: "Profundidade máxima de herança por path"
+        required: false
+        default: "2"
+        type: string
+      max_pages:
+        description: "Limite de páginas do crawl"
+        required: false
+        default: "200"
+        type: string
+
+permissions:
+  contents: read
+
+# Um único worker por vez mexe no SQLite restaurado do cache.
+concurrency:
+  group: kom-database
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      KOM_DB: data/kom.sqlite
+      KOM_OUT: knowledge
+      KOM_SITE: site/api
+      KOM_DELAY: "1.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -e .
+
+      - name: Restaura banco SQLite da execução anterior
+        uses: actions/cache/restore@v4
+        with:
+          path: data/kom.sqlite*
+          key: kom-db-${{ github.run_id }}
+          restore-keys: |
+            kom-db-
+
+      - name: Retoma pendências de execuções anteriores (recuperação após queda)
+        run: kom worker
+
+      - name: Enfileira e executa o novo crawl
+        env:
+          KOM_URL: ${{ inputs.url }}
+          KOM_MAX_DEPTH: ${{ inputs.max_depth }}
+          KOM_MAX_PAGES: ${{ inputs.max_pages }}
+        run: kom crawl --url "$KOM_URL" --max-depth "$KOM_MAX_DEPTH" --max-pages "$KOM_MAX_PAGES"
+
+      - name: Salva banco SQLite (mesmo se o crawl falhar, para retomada)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/kom.sqlite*
+          key: kom-db-${{ github.run_id }}
+
+      - name: Checkout do repositório de conhecimento
+        if: ${{ vars.KNOWLEDGE_REPO != '' && secrets.KNOWLEDGE_REPO_TOKEN != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.KNOWLEDGE_REPO }}
+          token: ${{ secrets.KNOWLEDGE_REPO_TOKEN }}
+          path: kb
+
+      - name: Publica Markdown e API estática no repositório de conhecimento
+        if: ${{ vars.KNOWLEDGE_REPO != '' && secrets.KNOWLEDGE_REPO_TOKEN != '' }}
+        env:
+          KOM_URL: ${{ inputs.url }}
+        run: |
+          set -euo pipefail
+          mkdir -p kb/knowledge kb/api
+          # sem --delete: cada execução só gera o próprio crawl; os anteriores permanecem
+          rsync -a knowledge/ kb/knowledge/
+          rsync -a site/api/ kb/api/
+          cd kb
+          git config user.name "kom-bot"
+          git config user.email "kom-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nada novo para publicar."
+          else
+            git commit -m "crawl: $KOM_URL"
+            git push
+          fi
+
+      - name: Artefato da execução (fallback quando não há repositório de conhecimento)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: knowledge-${{ github.run_id }}
+          path: |
+            knowledge/
+            site/api/
+          if-no-files-found: ignore
+          retention-days: 14
